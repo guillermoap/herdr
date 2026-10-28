@@ -133,6 +133,9 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     ] {
         cmd.env_remove(key);
     }
+    // The server is often auto-started by a non-tty tool that sets NO_COLOR; panes
+    // are a truecolor terminal, so inheriting it turns every agent monochrome.
+    cmd.env_remove("NO_COLOR");
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -4381,6 +4384,7 @@ mod tests {
             "ZELLIJ",
             "ZELLIJ_SESSION_NAME",
             "ZELLIJ_PANE_ID",
+            "NO_COLOR",
         ];
         let mut cmd = CommandBuilder::new("shell");
         for key in keys {
