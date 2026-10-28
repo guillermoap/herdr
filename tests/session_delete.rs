@@ -31,9 +31,9 @@ impl SessionConfig {
 
     fn session_dir(&self, name: &str) -> PathBuf {
         let app_dir = if cfg!(debug_assertions) {
-            "herdr-dev"
+            "herdr-custom-dev"
         } else {
-            "herdr"
+            "herdr-custom"
         };
         self.root.join(app_dir).join("sessions").join(name)
     }

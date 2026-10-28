@@ -51,9 +51,9 @@ impl Harness {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let app = if cfg!(debug_assertions) {
-            "herdr-dev"
+            "herdr-custom-dev"
         } else {
-            "herdr"
+            "herdr-custom"
         };
         let state = root.join("state").join(app).join("client");
         let session = root.join("config").join(app).join("sessions/fleet");

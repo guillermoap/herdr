@@ -212,7 +212,10 @@ fn duplicate_repo_parents_remain_visible_and_focusable_when_collapsed() {
                     .find(|hit| hit.workspace_id == workspace_id)
                     .expect("repository parent remains visible");
                 assert!(!hit.indented);
-                assert_eq!(hit.group_toggle.is_some(), linked_child);
+                assert_eq!(
+                    hit.group_toggle.is_some(),
+                    linked_child || workspace_id == "ws_1"
+                );
             }
             let parent = state.hits.workspaces[0].rect;
             let status_cell =

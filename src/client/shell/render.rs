@@ -321,6 +321,9 @@ pub(super) fn render_shell(
             &mut hits,
         );
     }
+    if layout.tab_bar.height == 0 {
+        *state.reveal_focused_tab = false;
+    }
     if !config.mouse_capture {
         hits.sidebar_divider = Rect::default();
         hits.sidebar_section_divider = Rect::default();
@@ -330,6 +333,7 @@ pub(super) fn render_shell(
         hits.new_workspace = Rect::default();
         hits.machines.clear();
         hits.workspaces.clear();
+        hits.sidebar_tabs.clear();
         hits.agents.clear();
         hits.endpoint_agents.clear();
         hits.tab_scroll_left = Rect::default();

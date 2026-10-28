@@ -941,22 +941,25 @@ impl ClientShellState {
                 Some(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }))
             }
             KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace => {
-                let entries = self.navigation_workspace_entries(snapshot);
+                let entries = super::endpoint_navigation::parent_workspace_entries(snapshot);
                 if entries.is_empty() {
                     return None;
                 }
-                let current = entries
-                    .iter()
-                    .position(|entry| {
-                        snapshot.workspaces[entry.index].workspace_id == focused_workspace
-                    })
-                    .unwrap_or(0);
-                let delta = if action == KeybindAction::PreviousWorkspace {
-                    -1
-                } else {
-                    1
+                let parent = super::endpoint_navigation::workspace_navigation_parent(
+                    snapshot,
+                    &focused_workspace,
+                );
+                let current = entries.iter().position(|entry| {
+                    Some(snapshot.workspaces[entry.index].workspace_id.as_str()) == parent
+                });
+                let next = match (current, action) {
+                    (Some(index), KeybindAction::PreviousWorkspace) => {
+                        (index + entries.len() - 1) % entries.len()
+                    }
+                    (Some(index), KeybindAction::NextWorkspace) => (index + 1) % entries.len(),
+                    (None, KeybindAction::PreviousWorkspace) => entries.len() - 1,
+                    _ => 0,
                 };
-                let next = (current as isize + delta).rem_euclid(entries.len() as isize) as usize;
                 let workspace_id = snapshot.workspaces[entries[next].index]
                     .workspace_id
                     .clone();

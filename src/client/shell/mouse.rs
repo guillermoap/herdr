@@ -515,6 +515,9 @@ impl ClientShellState {
             || self.hits.workspaces.iter().any(|hit| {
                 hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
             })
+            || self.hits.sidebar_tabs.iter().any(|(rect, endpoint, _)| {
+                endpoint != &self.active_endpoint_id && super::contains(*rect, point)
+            })
         {
             return None;
         }
@@ -526,15 +529,16 @@ impl ClientShellState {
             .filter(|hit| hit.endpoint_id == self.active_endpoint_id && !hit.indented)
             .filter(|hit| {
                 hit.group_toggle.as_ref().is_none_or(|(_, key)| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| {
-                            workspace.worktree.as_ref().is_some_and(|worktree| {
-                                worktree.key == *key && !worktree.is_linked_worktree
+                    key == &super::sidebar_tabs::tab_group_key(&hit.workspace_id)
+                        || snapshot
+                            .workspaces
+                            .iter()
+                            .find(|workspace| {
+                                workspace.worktree.as_ref().is_some_and(|worktree| {
+                                    worktree.key == *key && !worktree.is_linked_worktree
+                                })
                             })
-                        })
-                        .is_some_and(|workspace| workspace.workspace_id == hit.workspace_id)
+                            .is_some_and(|workspace| workspace.workspace_id == hit.workspace_id)
                 })
             })
             .map(|hit| (Some(hit.workspace_id.clone()), hit.rect.y.saturating_sub(1)))
@@ -1843,6 +1847,19 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                let sidebar_tab = self
+                    .hits
+                    .sidebar_tabs
+                    .iter()
+                    .find(|(rect, endpoint, _)| {
+                        endpoint == &self.active_endpoint_id && super::contains(*rect, point)
+                    })
+                    .map(|(_, _, tab)| tab.clone());
+                if let Some(tab) = sidebar_tab {
+                    self.open_tab_context_menu(tab, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let tab_id = self
                     .hits
                     .tabs
@@ -2085,6 +2102,17 @@ impl ClientShellState {
                         .tab_scroll
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
+                    outcome.repaint = true;
+                    return;
+                }
+                let sidebar_tab = self
+                    .hits
+                    .sidebar_tabs
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .map(|(_, endpoint, tab)| (endpoint.clone(), tab.clone()));
+                if let Some((endpoint, tab)) = sidebar_tab {
+                    self.focus_or_activate(endpoint, ClientEndpointFocusTarget::Tab(tab), outcome);
                     outcome.repaint = true;
                     return;
                 }

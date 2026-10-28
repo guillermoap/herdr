@@ -22,7 +22,7 @@ pub(super) fn unique_test_dir() -> PathBuf {
 
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
     config_home
-        .join("herdr-dev")
+        .join("herdr-custom-dev")
         .join("plugins")
         .join("github-installations")
 }
@@ -146,9 +146,9 @@ pub(super) fn spawn_herdr_with_pane_history(
 
 pub(super) fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
-        "herdr-dev"
+        "herdr-custom-dev"
     } else {
-        "herdr"
+        "herdr-custom"
     }
 }
 

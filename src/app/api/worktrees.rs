@@ -10,6 +10,7 @@ use super::responses::{encode_error, encode_success};
 
 mod deferred;
 mod reads;
+mod server_layout;
 
 struct ApiFailure {
     code: &'static str,
@@ -92,6 +93,15 @@ impl App {
         let canonical_source = crate::worktree::canonical_or_original(&source.source_checkout_path);
         let target_is_source = canonical_path == canonical_source;
         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
+        let server_layout = already_open
+            .is_none()
+            .then(|| server_layout::canary_server_layout(&entry.path))
+            .flatten();
+        let previous_workspace_id = self
+            .state
+            .active
+            .and_then(|idx| self.state.workspaces.get(idx))
+            .map(|workspace| workspace.id.clone());
         let defer_source_created_event = target_is_source && already_open.is_none();
         let created_source_workspace =
             match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
@@ -143,6 +153,22 @@ impl App {
         self.state.mark_session_dirty();
         if created_workspace {
             self.emit_workspace_open_events(ws_idx);
+            if let Some(layout) = server_layout {
+                if let Err(message) = self.apply_worktree_server_layout(ws_idx, layout) {
+                    let mut created_indices = vec![ws_idx];
+                    if created_source_workspace {
+                        if let Some(source_idx) = source.workspace_idx.filter(|idx| *idx != ws_idx)
+                        {
+                            created_indices.push(source_idx);
+                        }
+                    }
+                    self.rollback_worktree_server_workspaces(
+                        created_indices,
+                        previous_workspace_id.as_deref(),
+                    );
+                    return encode_error(id, "worktree_open_failed", message);
+                }
+            }
         }
 
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
@@ -738,6 +764,191 @@ mod tests {
         response_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("deferred API request should respond after completion event")
+    }
+
+    fn open_test_server_worktree(app: &mut App, checkout: &Path, focus: bool) -> SuccessResponse {
+        let source = app
+            .worktree_source_from_workspace(0)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let response = app.finish_worktree_open(
+            "server-worktree".into(),
+            WorktreeOpenParams {
+                focus,
+                ..Default::default()
+            },
+            source,
+            crate::worktree::ExistingWorktree {
+                path: checkout.into(),
+                branch: Some("servers".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+            },
+        );
+        serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("expected worktree response: {error}: {response}"))
+    }
+
+    fn create_server_worktree(repo: &Path) -> PathBuf {
+        let checkout = unique_temp_path("api-server-worktree");
+        run_git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "servers",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        for directory in ["backend/canary", "backend/pms-gateway"] {
+            std::fs::create_dir_all(checkout.join(directory)).unwrap();
+        }
+        checkout
+    }
+
+    #[tokio::test]
+    async fn api_worktree_open_creates_server_layout_once_and_preserves_focus() {
+        use crate::api::schema::{LayoutExportParams, LayoutNode, SplitDirection};
+
+        for focus in [false, true] {
+            let repo = create_committed_repo("api-server-layout");
+            let checkout = create_server_worktree(&repo);
+            let mut app = app_with_parent(&repo);
+            let success = open_test_server_worktree(&mut app, &checkout, focus);
+            let ResponseResult::WorktreeOpened {
+                workspace,
+                tab,
+                root_pane,
+                already_open,
+                ..
+            } = success.result
+            else {
+                panic!("expected worktree opened");
+            };
+            assert!(!already_open);
+            assert_eq!(workspace.tab_count, 1);
+            assert_eq!(workspace.pane_count, 2);
+            assert_eq!(tab.label, "Servers");
+            assert_eq!(app.state.active, Some(usize::from(focus)));
+            assert!(
+                app.state.workspaces[1]
+                    .worktree_space()
+                    .unwrap()
+                    .is_linked_worktree
+            );
+
+            let response = app.handle_layout_export(
+                "layout".into(),
+                LayoutExportParams {
+                    tab_id: Some(tab.tab_id.clone()),
+                    pane_id: None,
+                },
+            );
+            let exported: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::LayoutExport { layout } = exported.result else {
+                panic!("expected exported layout");
+            };
+            assert_eq!(layout.focused_pane_id, root_pane.pane_id);
+            let LayoutNode::Split {
+                direction,
+                first,
+                second,
+                ..
+            } = layout.root
+            else {
+                panic!("expected server split");
+            };
+            assert_eq!(direction, SplitDirection::Down);
+            for (node, path) in [
+                (first, checkout.join("backend/canary")),
+                (second, checkout.join("backend/pms-gateway")),
+            ] {
+                let LayoutNode::Pane { pane } = *node else {
+                    panic!("expected server pane");
+                };
+                assert_eq!(
+                    crate::worktree::canonical_or_original(Path::new(&pane.cwd.unwrap())),
+                    crate::worktree::canonical_or_original(&path),
+                );
+                assert!(pane.command.is_none());
+            }
+
+            let pane_ids = app.state.workspaces[1].tabs[0].layout.pane_ids();
+            app.state.workspaces[1].tabs[0].set_custom_name("My servers".into());
+            let reopened = open_test_server_worktree(&mut app, &checkout, focus);
+            let ResponseResult::WorktreeOpened {
+                tab: reopened_tab,
+                already_open,
+                ..
+            } = reopened.result
+            else {
+                panic!("expected reused worktree");
+            };
+            assert!(already_open);
+            assert_eq!(reopened_tab.tab_id, tab.tab_id);
+            assert_eq!(reopened_tab.label, "My servers");
+            assert_eq!(app.state.workspaces.len(), 2);
+            assert_eq!(app.state.workspaces[1].tabs[0].layout.pane_ids(), pane_ids);
+            crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+            let _ = std::fs::remove_dir_all(checkout);
+            let _ = std::fs::remove_dir_all(repo);
+        }
+    }
+
+    #[tokio::test]
+    async fn api_worktree_open_incomplete_server_directories_keep_ordinary_layout() {
+        let repo = create_committed_repo("api-server-incomplete");
+        let checkout = create_server_worktree(&repo);
+        std::fs::remove_dir(checkout.join("backend/pms-gateway")).unwrap();
+        let mut app = app_with_parent(&repo);
+        let success = open_test_server_worktree(&mut app, &checkout, true);
+        let ResponseResult::WorktreeOpened { workspace, .. } = success.result else {
+            panic!("expected opened worktree");
+        };
+        assert_eq!(workspace.pane_count, 1);
+        assert_eq!(workspace.tab_count, 1);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn worktree_server_layout_failure_rolls_back_panes_and_new_workspace() {
+        let repo = create_committed_repo("api-server-rollback");
+        let checkout = create_server_worktree(&repo);
+        let mut app = app_with_parent(&repo);
+        let previous_workspace_id = app.state.workspaces[0].id.clone();
+        let initial_terminals = app.state.terminals.len();
+        let ws_idx = app
+            .create_workspace_with_options(checkout.clone(), true)
+            .unwrap();
+        let mut root = server_layout::canary_server_layout(&checkout).unwrap();
+        let crate::api::schema::LayoutNode::Split { second, .. } = &mut root else {
+            panic!("expected server split");
+        };
+        let crate::api::schema::LayoutNode::Pane { pane } = second.as_mut() else {
+            panic!("expected gateway pane");
+        };
+        pane.command = Some(vec![checkout
+            .join("missing-server-shell")
+            .display()
+            .to_string()]);
+        let initial_panes = app.state.workspaces[ws_idx].tabs[0].layout.pane_ids();
+        assert!(app.apply_worktree_server_layout(ws_idx, root).is_err());
+        assert_eq!(app.state.workspaces[ws_idx].tabs.len(), 1);
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs[0].layout.pane_ids(),
+            initial_panes
+        );
+        app.rollback_worktree_server_workspaces(vec![ws_idx], Some(&previous_workspace_id));
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.terminals.len(), initial_terminals);
+        assert_eq!(app.terminal_runtimes.len(), 0);
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[tokio::test]

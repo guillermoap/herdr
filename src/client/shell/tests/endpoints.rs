@@ -1147,7 +1147,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     assert_eq!(local_workspaces.len(), 2);
     assert_eq!(
         local_workspaces[1].rect.y,
-        local_workspaces[0].rect.bottom() + 1
+        local_workspaces[0].rect.bottom() + 2
     );
 
     let local_machine = state
@@ -1175,7 +1175,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     assert_eq!(remote_workspaces[0].rect.y, remote_machine.rect.bottom());
     assert_eq!(
         remote_workspaces[1].rect.y,
-        remote_workspaces[0].rect.bottom()
+        remote_workspaces[0].rect.bottom() + 1
     );
     assert_eq!(
         remote_workspaces[2].rect.y,
@@ -1183,7 +1183,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     );
 
     state.workspace_scroll = usize::MAX;
-    state.compose(100, 18).expect("scrolled endpoint frame");
+    state.compose(100, 20).expect("scrolled endpoint frame");
     let metrics = state
         .hits
         .workspace_scroll_metrics

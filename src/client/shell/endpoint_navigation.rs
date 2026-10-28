@@ -1,5 +1,36 @@
 use super::*;
 
+pub(super) fn parent_workspace_entries(snapshot: &ClientShellSnapshot) -> Vec<WorkspaceEntry> {
+    render::workspace_entries(snapshot, &HashSet::new())
+        .into_iter()
+        .filter(|entry| !entry.indented)
+        .collect()
+}
+
+pub(super) fn workspace_navigation_parent<'a>(
+    snapshot: &'a ClientShellSnapshot,
+    workspace_id: &str,
+) -> Option<&'a str> {
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == workspace_id)?;
+    if let Some(worktree) = workspace
+        .worktree
+        .as_ref()
+        .filter(|worktree| worktree.is_linked_worktree)
+    {
+        if let Some(parent) = snapshot.workspaces.iter().find(|candidate| {
+            candidate.worktree.as_ref().is_some_and(|candidate| {
+                candidate.key == worktree.key && !candidate.is_linked_worktree
+            })
+        }) {
+            return Some(&parent.workspace_id);
+        }
+    }
+    Some(&workspace.workspace_id)
+}
+
 impl ClientShellState {
     pub(super) fn active_endpoint_workspace_at(&self, point: (u16, u16)) -> Option<String> {
         self.hits
@@ -122,7 +153,7 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
+                            parent_workspace_entries(snapshot)
                                 .into_iter()
                                 .filter_map(|entry| {
                                     snapshot.workspaces.get(entry.index).map(|workspace| {
@@ -139,10 +170,9 @@ impl ClientShellState {
             if workspaces.is_empty() {
                 return true;
             }
-            let focused = self
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.focused_workspace_id.as_deref());
+            let focused = self.snapshot.as_deref().and_then(|snapshot| {
+                workspace_navigation_parent(snapshot, snapshot.focused_workspace_id.as_deref()?)
+            });
             let current = workspaces.iter().position(|(endpoint_id, workspace_id)| {
                 endpoint_id == &self.active_endpoint_id && Some(workspace_id.as_str()) == focused
             });
@@ -303,5 +333,209 @@ impl ClientShellState {
             });
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::KeybindAction;
+    use crate::protocol::ClientShellWorktree;
+
+    fn grouped_snapshot(focused: &str) -> ClientShellSnapshot {
+        let mut snapshot = super::super::tests::snapshot();
+        let template = snapshot.workspaces[0].clone();
+        snapshot.workspaces = [
+            ("first", None),
+            ("parent", Some(("repo", false))),
+            ("child", Some(("repo", true))),
+            ("last", None),
+            ("orphan", Some(("other", true))),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, worktree))| {
+            let mut workspace = template.clone();
+            workspace.workspace_id = id.into();
+            workspace.number = index + 1;
+            workspace.focused = id == focused;
+            workspace.worktree = worktree.map(|(key, is_linked_worktree)| ClientShellWorktree {
+                key: key.into(),
+                label: key.into(),
+                is_linked_worktree,
+            });
+            workspace
+        })
+        .collect();
+        snapshot.focused_workspace_id = Some(focused.into());
+        snapshot
+    }
+
+    #[test]
+    fn parent_workspace_shortcuts_skip_children_and_preserve_orphans() {
+        for collapsed in [false, true] {
+            for (focused, action, expected) in [
+                ("first", KeybindAction::NextWorkspace, "parent"),
+                ("parent", KeybindAction::NextWorkspace, "last"),
+                ("child", KeybindAction::NextWorkspace, "last"),
+                ("child", KeybindAction::PreviousWorkspace, "first"),
+                ("last", KeybindAction::PreviousWorkspace, "parent"),
+                ("last", KeybindAction::NextWorkspace, "orphan"),
+                ("orphan", KeybindAction::PreviousWorkspace, "last"),
+                ("orphan", KeybindAction::NextWorkspace, "first"),
+                ("first", KeybindAction::PreviousWorkspace, "orphan"),
+            ] {
+                let mut state =
+                    ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+                if collapsed {
+                    state.collapsed_groups.insert("repo".into());
+                }
+                state.set_snapshot(Box::new(grouped_snapshot(focused)));
+                assert!(
+                    matches!(
+                        state.endpoint_method_for_action(action),
+                        Some(crate::api::schema::Method::WorkspaceFocus(target))
+                            if target.workspace_id == expected
+                    ),
+                    "{focused} {action:?}, collapsed={collapsed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parent_workspace_shortcuts_with_one_group_return_its_parent() {
+        for focused in ["parent", "child"] {
+            let mut snapshot = grouped_snapshot(focused);
+            snapshot
+                .workspaces
+                .retain(|workspace| matches!(workspace.workspace_id.as_str(), "parent" | "child"));
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            state.set_snapshot(Box::new(snapshot));
+            for action in [
+                KeybindAction::PreviousWorkspace,
+                KeybindAction::NextWorkspace,
+            ] {
+                assert!(matches!(
+                    state.endpoint_method_for_action(action),
+                    Some(crate::api::schema::Method::WorkspaceFocus(target))
+                        if target.workspace_id == "parent"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn parent_workspace_shortcuts_keep_duplicate_parent_identity() {
+        let mut snapshot = grouped_snapshot("duplicate");
+        let mut duplicate = snapshot.workspaces[1].clone();
+        duplicate.workspace_id = "duplicate".into();
+        duplicate.focused = true;
+        snapshot.workspaces.push(duplicate);
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot));
+        assert!(matches!(
+            state.endpoint_method_for_action(KeybindAction::PreviousWorkspace),
+            Some(crate::api::schema::Method::WorkspaceFocus(target))
+                if target.workspace_id == "parent"
+        ));
+    }
+
+    #[test]
+    fn parent_workspace_shortcuts_cross_endpoints_without_confusing_workspace_ids() {
+        use crate::client::endpoint::{ProfileId, SavedSshEndpoint};
+
+        let profile = SavedSshEndpoint {
+            id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "Build".into(),
+            target: "dev@build.example".into(),
+            session: "agents".into(),
+            enabled: true,
+        };
+        let remote = ClientEndpointId::Ssh(profile.id.clone());
+        for (active, focused, action, expected_endpoint, expected_workspace) in [
+            (
+                ClientEndpointId::Local,
+                "child",
+                KeybindAction::NextWorkspace,
+                ClientEndpointId::Local,
+                "last",
+            ),
+            (
+                ClientEndpointId::Local,
+                "child",
+                KeybindAction::PreviousWorkspace,
+                ClientEndpointId::Local,
+                "first",
+            ),
+            (
+                ClientEndpointId::Local,
+                "orphan",
+                KeybindAction::NextWorkspace,
+                remote.clone(),
+                "first",
+            ),
+            (
+                remote.clone(),
+                "child",
+                KeybindAction::NextWorkspace,
+                remote.clone(),
+                "last",
+            ),
+            (
+                remote.clone(),
+                "first",
+                KeybindAction::PreviousWorkspace,
+                ClientEndpointId::Local,
+                "orphan",
+            ),
+            (
+                remote.clone(),
+                "orphan",
+                KeybindAction::NextWorkspace,
+                ClientEndpointId::Local,
+                "first",
+            ),
+        ] {
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            state.set_endpoint_catalog(std::slice::from_ref(&profile));
+            state.set_snapshot(Box::new(grouped_snapshot(focused)));
+            state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+            let mut remote_snapshot = grouped_snapshot(focused);
+            remote_snapshot.boot_id = "remote-boot".into();
+            state.set_endpoint_snapshot(&remote, Box::new(remote_snapshot));
+            if active == remote {
+                assert!(state.activate_endpoint_projection(&remote));
+            }
+            let mut outcome = ClientShellInput::default();
+            assert!(state.handle_endpoint_navigation(action, &mut outcome));
+            let [result] = outcome.actions.as_slice() else {
+                panic!("expected exactly one navigation action");
+            };
+            match result {
+                ClientShellAction::ActivateEndpoint {
+                    endpoint_id,
+                    target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
+                } => {
+                    assert_eq!(endpoint_id, &expected_endpoint);
+                    assert_eq!(workspace_id, expected_workspace);
+                }
+                ClientShellAction::Endpoint {
+                    endpoint_id,
+                    request,
+                    ..
+                } => {
+                    assert_eq!(endpoint_id, &expected_endpoint);
+                    assert!(matches!(
+                        &request.method,
+                        crate::api::schema::Method::WorkspaceFocus(target)
+                            if target.workspace_id == expected_workspace
+                    ));
+                }
+                _ => panic!("expected a workspace focus action"),
+            }
+        }
     }
 }

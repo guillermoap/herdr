@@ -2107,6 +2107,9 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    if env!("CARGO_PKG_REPOSITORY") != "https://github.com/herdrdev/herdr" {
+        return Err("This custom build is updated from your fork. Build and install it locally; the upstream updater would replace your custom features.".into());
+    }
     let channel = UpdateChannel::configured();
 
     if is_homebrew_managed_install() {

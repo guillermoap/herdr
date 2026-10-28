@@ -76,10 +76,14 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
-    fs::create_dir_all(config.join("herdr")).unwrap();
+    fs::create_dir_all(config.join("herdr-custom")).unwrap();
     fs::create_dir_all(runtime).unwrap();
     register_runtime_dir(runtime);
-    fs::write(config.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(
+        config.join("herdr-custom/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,

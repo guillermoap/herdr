@@ -90,6 +90,7 @@ pub(super) struct ShellHitMap {
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
+    pub(super) sidebar_tabs: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) panes: Vec<PaneHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -1209,9 +1210,23 @@ impl ClientShellState {
             return;
         }
         let target = self.snapshot.as_deref().and_then(|snapshot| {
-            self.navigation_workspace_entries(snapshot)
+            if self.sidebar_collapsed || self.mobile_layout_active() {
+                self.navigation_workspace_entries(snapshot)
+                    .iter()
+                    .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+            } else {
+                let empty = HashSet::new();
+                super::sidebar_tabs::entries(
+                    snapshot,
+                    self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
+                        .unwrap_or(&empty),
+                )
                 .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+                .position(|entry| {
+                    entry.tab.is_none()
+                        && snapshot.workspaces[entry.workspace.index].workspace_id == workspace_id
+                })
+            }
         });
         if let Some(target) = target {
             self.workspace_scroll = target.min(self.hits.workspace_max_scroll);

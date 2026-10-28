@@ -101,9 +101,9 @@ fn server_integrity_requires_startup_consent_on_both_endpoints() {
         directory,
     };
     let app_dir = if cfg!(debug_assertions) {
-        "herdr-dev"
+        "herdr-custom-dev"
     } else {
-        "herdr"
+        "herdr-custom"
     };
     let session_dir = server
         .directory

@@ -226,7 +226,7 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let entries = super::super::sidebar_tabs::entries(snapshot, state.collapsed_groups);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -239,14 +239,17 @@ pub(crate) fn render_sidebar(
     let row_heights = entries
         .iter()
         .map(|entry| {
+            if entry.tab.is_some() {
+                return 1;
+            }
             snapshot
                 .workspaces
-                .get(entry.index)
+                .get(entry.workspace.index)
                 .map(|workspace| {
                     workspace_rows(
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
+                        entry.workspace.indented,
                         &config.spaces,
                     )
                     .len()
@@ -260,9 +263,9 @@ pub(crate) fn render_sidebar(
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
+            entries.get(index + 1).map_or(0, |next| {
+                u16::from(next.tab.is_none() && !next.workspace.indented) * config.spaces.row_gap
+            })
         })
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
@@ -272,10 +275,30 @@ pub(crate) fn render_sidebar(
         *state.workspace_scroll,
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+        if let Some(target) = entries.iter().position(|entry| {
+            entry.tab.is_none() && snapshot.workspaces[entry.workspace.index].focused
+        }) {
+            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+                &row_heights,
+                &gaps,
+                body.height,
+                *state.workspace_scroll,
+                target,
+            );
+            metrics = super::scroll::list_scroll_metrics(
+                &row_heights,
+                &gaps,
+                body.height,
+                *state.workspace_scroll,
+            );
+        }
+    }
+    if !body.is_empty() && *state.reveal_focused_tab && state.selected_workspace_id.is_none() {
+        if let Some(target) = entries.iter().position(|entry| {
+            entry.tab.is_some_and(|index| {
+                snapshot.focused_tab_id.as_deref() == Some(snapshot.tabs[index].tab_id.as_str())
+            })
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -300,11 +323,28 @@ pub(crate) fn render_sidebar(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
     for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
-        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+        if entry.tab.is_some() {
+            if y >= body.bottom() {
+                break;
+            }
+            super::super::sidebar_tabs::render_tab(
+                buffer,
+                Rect::new(body.x, y, content_width, 1),
+                snapshot,
+                entry,
+                state.active_endpoint_id,
+                true,
+                config,
+                hits,
+            );
+            y = y.saturating_add(1 + gaps[entry_position]);
+            continue;
+        }
+        let Some(workspace) = snapshot.workspaces.get(entry.workspace.index) else {
             continue;
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
+        let rows = workspace_rows(workspace, status, entry.workspace.indented, &config.spaces);
         let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
@@ -326,7 +366,7 @@ pub(crate) fn render_sidebar(
             rect,
             status,
             config.status_indicators,
-            entry,
+            &entry.workspace,
             rows,
             workspace.focused,
             selected,
@@ -338,7 +378,7 @@ pub(crate) fn render_sidebar(
             buffer,
             rect,
             snapshot,
-            entry.index,
+            entry.workspace.index,
             state.collapsed_groups,
             palette,
         );
@@ -346,12 +386,12 @@ pub(crate) fn render_sidebar(
             rect,
             endpoint_id: ClientEndpointId::Local,
             workspace_id: workspace.workspace_id.clone(),
-            indented: entry.indented,
+            indented: entry.workspace.indented,
             group_toggle,
         });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
+        let gap = entries.get(entry_position + 1).map_or(0, |next| {
+            u16::from(next.tab.is_none() && !next.workspace.indented) * config.spaces.row_gap
+        });
         y = y.saturating_add(row_height + gap);
     }
 
@@ -608,7 +648,14 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
     collapsed_groups: &HashSet<String>,
     palette: &Palette,
 ) -> Option<(Rect, String)> {
-    let key = parent_group_key(snapshot, workspace_index)?;
+    let key = parent_group_key(snapshot, workspace_index).or_else(|| {
+        let workspace = snapshot.workspaces.get(workspace_index)?;
+        snapshot
+            .tabs
+            .iter()
+            .any(|tab| tab.workspace_id == workspace.workspace_id)
+            .then(|| super::super::sidebar_tabs::tab_group_key(&workspace.workspace_id))
+    })?;
     let toggle = Rect::new(
         workspace_rect.right().saturating_sub(1),
         workspace_rect.y,
