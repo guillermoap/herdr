@@ -1296,7 +1296,7 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("○ Local · local agent"), "frame: {text}");
-    assert!(text.contains("× Build · remote agent"), "frame: {text}");
+    assert!(text.contains("× Build · remote"), "frame: {text}");
     assert!(text.contains("grouped"), "frame: {text}");
     let toggle = state.hits.agent_sort_toggle;
     assert!(!toggle.is_empty());
@@ -1319,6 +1319,51 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         .content()
         .iter()
         .any(|cell| cell.symbol() == "×" && cell.fg == state.config.palette.red));
+}
+
+#[test]
+fn grouped_agents_nest_under_one_heading_per_tab() {
+    use crate::api::schema::AgentStatus;
+    use crate::config::AgentSidebarToken;
+
+    let mut config = Config::default();
+    config.ui.sidebar.agents.row_gap = 1;
+    config.ui.sidebar.agents.rows = vec![vec![AgentSidebarToken::Agent]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let mut local = snapshot();
+    local.tabs[0].label = "review".into();
+    local.tabs[0].custom_label = true;
+    let mut second = agent("second agent", AgentStatus::Working, 2);
+    second.pane_id = "pane_2".into();
+    second.focused = false;
+    local.agents = vec![agent("first agent", AgentStatus::Idle, 1), second];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(100, 28).expect("grouped agent frame");
+    let lines = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains("client-shell › review"))
+        .unwrap_or_else(|| panic!("frame: {}", lines.join("\n")));
+    assert!(lines[heading + 1].contains("├─ first agent"));
+    assert!(lines[heading + 2].contains(" │"));
+    assert!(lines[heading + 3].contains("└─ second agent"));
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("client-shell › review"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -2239,7 +2284,7 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         Some(ClientEndpointStatus::Reconnecting)
     );
     assert!(text.contains("◐ reconnecting"), "frame: {text}");
-    assert!(text.contains("Build · remote agent"), "frame: {text}");
+    assert!(text.contains("Build · remote"), "frame: {text}");
     assert!(
         text.contains("LIVE"),
         "frozen surface should remain: {text}"

@@ -14,7 +14,185 @@ pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
+    pub(super) tab_id: String,
+    pub(super) tab_heading: String,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+}
+
+impl AsRef<AgentRow> for AgentRow {
+    fn as_ref(&self) -> &AgentRow {
+        self
+    }
+}
+
+pub(super) struct TabHeading {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) tab_id: String,
+    pub(super) label: String,
+    pub(super) focused: bool,
+    pub(super) stale: bool,
+}
+
+pub(super) enum AgentListItem<R> {
+    Tab(TabHeading),
+    Agent { row: R, last_in_tab: Option<bool> },
+}
+
+impl<R: AsRef<AgentRow>> AgentListItem<R> {
+    pub(super) fn lines(&self, row_gap: u16) -> usize {
+        match self {
+            Self::Tab(_) => 1,
+            Self::Agent { row, last_in_tab } => {
+                let gap = if *last_in_tab == Some(false) {
+                    row_gap
+                } else {
+                    0
+                };
+                row.as_ref().rows.len().max(1) + usize::from(gap)
+            }
+        }
+    }
+
+    pub(super) fn gap_before(&self, next: &Self, row_gap: u16) -> u16 {
+        match (self, next) {
+            (
+                Self::Agent {
+                    last_in_tab: None, ..
+                },
+                _,
+            )
+            | (_, Self::Tab(_)) => row_gap,
+            _ => 0,
+        }
+    }
+}
+
+pub(super) fn groups_by_tab(
+    sort: crate::config::AgentPanelSortConfig,
+    agent_view_label: Option<&str>,
+) -> bool {
+    sort == crate::config::AgentPanelSortConfig::Spaces && agent_view_label.is_none()
+}
+
+pub(super) fn agent_list_items<R: AsRef<AgentRow>>(
+    rows: Vec<R>,
+    grouped: bool,
+    heading: impl Fn(&R) -> TabHeading,
+) -> Vec<AgentListItem<R>> {
+    let mut items = Vec::with_capacity(rows.len());
+    let mut open_heading = None;
+    let mut rows = rows.into_iter().peekable();
+    while let Some(row) = rows.next() {
+        if !grouped {
+            items.push(AgentListItem::Agent {
+                row,
+                last_in_tab: None,
+            });
+            continue;
+        }
+        let current = heading(&row);
+        let focused = current.focused;
+        let last = rows.peek().is_none_or(|next| {
+            let next = heading(next);
+            next.endpoint_id != current.endpoint_id || next.tab_id != current.tab_id
+        });
+        let index = match open_heading {
+            Some(index) => index,
+            None => {
+                items.push(AgentListItem::Tab(current));
+                items.len() - 1
+            }
+        };
+        if let AgentListItem::Tab(open) = &mut items[index] {
+            open.focused |= focused;
+        }
+        open_heading = (!last).then_some(index);
+        items.push(AgentListItem::Agent {
+            row,
+            last_in_tab: Some(last),
+        });
+    }
+    items
+}
+
+pub(super) fn render_agent_items<R: AsRef<AgentRow>>(
+    buffer: &mut Buffer,
+    area: Rect,
+    items: &[AgentListItem<R>],
+    empty_message: Option<&str>,
+    config: &ClientShellConfig,
+    agent_scroll: &mut usize,
+    hits: &mut ShellHitMap,
+    mut render_agent: impl FnMut(&mut Buffer, Rect, &R, Option<bool>, &mut ShellHitMap),
+) {
+    let row_gap = config.agents.row_gap;
+    render_agent_list(
+        buffer,
+        area,
+        items,
+        empty_message,
+        config,
+        agent_scroll,
+        hits,
+        |item| item.lines(row_gap),
+        |item, next| item.gap_before(next, row_gap),
+        |buffer, rect, item, hits| match item {
+            AgentListItem::Tab(heading) => render_tab_heading(buffer, rect, heading, config, hits),
+            AgentListItem::Agent { row, last_in_tab } => {
+                let agent_rect = Rect {
+                    height: rect
+                        .height
+                        .min(row.as_ref().rows.len().max(1).min(u16::MAX as usize) as u16),
+                    ..rect
+                };
+                render_agent(buffer, agent_rect, row, *last_in_tab, hits);
+                if *last_in_tab == Some(false) {
+                    for y in agent_rect.bottom()..rect.bottom() {
+                        put_text(
+                            buffer,
+                            rect.x,
+                            y,
+                            rect.width,
+                            " │",
+                            Style::default().fg(config.palette.overlay0),
+                        );
+                    }
+                }
+            }
+        },
+    );
+}
+
+fn render_tab_heading(
+    buffer: &mut Buffer,
+    rect: Rect,
+    heading: &TabHeading,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) {
+    let style = if heading.stale {
+        Style::default()
+            .fg(config.palette.overlay0)
+            .add_modifier(Modifier::DIM)
+    } else if heading.focused {
+        Style::default()
+            .fg(config.palette.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(config.palette.subtext0)
+            .add_modifier(Modifier::BOLD)
+    };
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        rect.width,
+        &format!(" {}", heading.label),
+        style,
+    );
+    hits.sidebar_tabs
+        .push((rect, heading.endpoint_id.clone(), heading.tab_id.clone()));
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -53,6 +231,7 @@ pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
+    endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
@@ -67,11 +246,25 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
-    render_agent_list(
+    let grouped = groups_by_tab(
+        config.agent_panel_sort,
+        snapshot.agent_view_label.as_deref(),
+    );
+    let items = agent_list_items(
+        agent_rows(snapshot, config, None, !grouped),
+        grouped,
+        |row| TabHeading {
+            endpoint_id: endpoint_id.clone(),
+            tab_id: row.tab_id.clone(),
+            label: row.tab_heading.clone(),
+            focused: row.focused,
+            stale: false,
+        },
+    );
+    render_agent_items(
         buffer,
         area,
-        &rows,
+        &items,
         snapshot
             .agent_view_label
             .as_ref()
@@ -79,10 +272,9 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
-        |buffer, rect, row, hits| {
+        |buffer, rect, row, last_in_tab, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            render_agent_row(buffer, rect, row, last_in_tab, config);
         },
     );
 }
@@ -160,6 +352,7 @@ pub(super) fn render_agent_list<T>(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
+    gap_between: impl Fn(&T, &T) -> u16,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
 ) {
     let body = Rect::new(
@@ -190,17 +383,7 @@ pub(super) fn render_agent_list<T>(
         .iter()
         .map(|row| row_lines(row).max(1).min(u16::MAX as usize) as u16)
         .collect::<Vec<_>>();
-    let gaps = rows
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            }
-        })
-        .collect::<Vec<_>>();
+    let gaps = list_gaps(rows, gap_between);
     let metrics =
         super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *agent_scroll);
     hits.agent_max_scroll = metrics.max_offset_from_bottom;
@@ -218,13 +401,7 @@ pub(super) fn render_agent_list<T>(
         }
         let rect = Rect::new(body.x, y, content_width, height);
         render_row(buffer, rect, row, hits);
-        y = y
-            .saturating_add(height)
-            .saturating_add(if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            });
+        y = y.saturating_add(height).saturating_add(gaps[index]);
     }
 
     if show_scrollbar {
@@ -238,10 +415,11 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    show_location: bool,
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine, show_location))
         .collect()
 }
 
@@ -250,6 +428,7 @@ pub(super) fn agent_row(
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    show_location: bool,
 ) -> Option<AgentRow> {
     let agent = snapshot
         .agents
@@ -269,9 +448,14 @@ pub(super) fn agent_row(
         .iter()
         .filter(|candidate| candidate.workspace_id == agent.workspace_id)
         .count();
-    let tab_label = tab
+    let informative_tab = tab
         .filter(|tab| tab_count > 1 || tab.custom_label)
         .map(|tab| tab.label.as_str());
+    let tab_label = informative_tab.filter(|_| show_location);
+    let tab_heading = informative_tab.map_or_else(
+        || workspace.label.clone(),
+        |tab| format!("{} › {tab}", workspace.label),
+    );
     let agent_label = agent
         .display_agent
         .as_deref()
@@ -296,7 +480,7 @@ pub(super) fn agent_row(
         &config.agents,
         crate::ui::AgentTokenContext {
             machine,
-            workspace: &workspace.label,
+            workspace: Some(workspace.label.as_str()).filter(|_| show_location),
             tab: tab_label,
             pane: agent
                 .title
@@ -314,6 +498,8 @@ pub(super) fn agent_row(
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
+        tab_id: agent.tab_id.clone(),
+        tab_heading,
         rows,
     })
 }
@@ -322,6 +508,7 @@ pub(super) fn render_agent_row(
     buffer: &mut Buffer,
     rect: Rect,
     row: &AgentRow,
+    last_in_tab: Option<bool>,
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
@@ -354,8 +541,16 @@ pub(super) fn render_agent_row(
         row.rows.clone()
     };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
-        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        let prefix = match (last_in_tab, index) {
+            (None, 0) => " ",
+            (None, _) => "   ",
+            (Some(false), 0) => " ├─ ",
+            (Some(true), 0) => " └─ ",
+            (Some(false), _) => " │    ",
+            (Some(true), _) => "      ",
+        };
+        let indent = display_width(prefix);
+        let mut spans = vec![ratatui::text::Span::styled(prefix, secondary)];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -371,6 +566,15 @@ pub(super) fn render_agent_row(
             buffer,
         );
     }
+}
+
+pub(super) fn list_gaps<T>(rows: &[T], gap_between: impl Fn(&T, &T) -> u16) -> Vec<u16> {
+    (0..rows.len())
+        .map(|index| {
+            rows.get(index + 1)
+                .map_or(0, |next| gap_between(&rows[index], next))
+        })
+        .collect()
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

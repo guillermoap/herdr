@@ -815,7 +815,9 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         tokens: Vec::new(),
         focused: true,
     }];
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     let frame = state.compose(106, 30).expect("agent sidebar frame");

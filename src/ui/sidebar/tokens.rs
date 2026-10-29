@@ -54,7 +54,7 @@ impl ResolvedToken {
 
 pub(crate) struct AgentTokenContext<'a> {
     pub(crate) machine: Option<&'a str>,
-    pub(crate) workspace: &'a str,
+    pub(crate) workspace: Option<&'a str>,
     pub(crate) tab: Option<&'a str>,
     pub(crate) pane: Option<&'a str>,
     pub(crate) agent_label: Option<&'a str>,
@@ -85,9 +85,9 @@ pub(crate) fn agent_rows(
                         AgentSidebarToken::Machine => context
                             .machine
                             .map(|value| ResolvedTokenKind::Machine(value.to_string())),
-                        AgentSidebarToken::Workspace => {
-                            Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
-                        }
+                        AgentSidebarToken::Workspace => context
+                            .workspace
+                            .map(|value| ResolvedTokenKind::Workspace(value.to_string())),
                         AgentSidebarToken::Tab => context
                             .tab
                             .map(|value| ResolvedTokenKind::Tab(value.to_string())),
@@ -219,7 +219,7 @@ mod tests {
     fn context(entry: &Entry) -> AgentTokenContext<'_> {
         AgentTokenContext {
             machine: None,
-            workspace: &entry.workspace,
+            workspace: Some(&entry.workspace),
             tab: entry.tab.as_deref(),
             pane: entry.pane.as_deref(),
             agent_label: entry.agent_label.as_deref(),
